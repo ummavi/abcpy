@@ -5,6 +5,7 @@ import numpy as np
 import cloudpickle
 import sys
 import time
+import functools
 
 
 class BackendMPIMaster(Backend):
@@ -440,10 +441,23 @@ class BackendMPISlave(Backend):
 
         pds = PDSMPI(data_chunk, pds_id, self)
 
-        f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for: ' + str(pds_id) + '\n')
+        f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for ' + str(pds_id) + '\n')
 
         return pds
 
+
+    def wrapper_map(self, func, data_item):
+        """ 
+        A wrapper function to measure single map iterations performance
+        """
+
+        start_map = time.time()
+
+        result = func(data_item)
+
+        f.write('Map_iterate: ' + str(time.time() - start_map) + ' for ' + str(data_item) + '\n')
+
+        return result
 
     def map(self, func, pds):
         """
@@ -464,16 +478,17 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
-        start_map = time.time()
+        #start_map = time.time()
 
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
 
-        rdd = list(map(func, pds.python_list))
+        #rdd = list(map(func, pds.python_list))
+        rdd = list(map(functools.partial(self.wrapper_map, func), pds.python_list))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
-        f.write('Map: ' + str(time.time() - start_map) + ' for: ' + str(pds_id) + ' and: ' + str(pds_id_new) + '\n')
+        #f.write('Map: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
 
         return pds_res
 
