@@ -4,6 +4,7 @@ from mpi4py import MPI
 import numpy as np
 import cloudpickle
 import sys
+import time
 
 
 class BackendMPIMaster(Backend):
@@ -430,12 +431,16 @@ class BackendMPISlave(Backend):
             A reference object that represents the parallelized list
         """
 
+        start_parallelize = time.time()
+
         #Get the PDS id we should store this data in
         pds_id,pds_id_new = self.__get_received_pds_id()
 
         data_chunk = self.comm.scatter(None, root=0)
 
         pds = PDSMPI(data_chunk, pds_id, self)
+
+        f.write('Parallelize: ' + str(time.time() - start_parallelize) + '\n')
 
         return pds
 
@@ -459,12 +464,16 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
+        start_map = time.time()
+
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
 
         rdd = list(map(func, pds.python_list))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
+
+        f.write('Map: ' + str(time.time() - start_map) + '\n')
 
         return pds_res
 
@@ -484,8 +493,12 @@ class BackendMPISlave(Backend):
             all elements of pds as a list
         """
 
+        start_collect = time.time()
+
         #Send the data we have back to the master
         _ = self.comm.gather(pds.python_list, root=0)
+
+        f.write('Collect: ' + str(time.time() - start_collect) + '\n')
 
 
     def broadcast(self,value):
@@ -493,8 +506,12 @@ class BackendMPISlave(Backend):
         Value is ignored for the slaves. We get data from master
         """
 
+        start_bcast = time.time()
+
         value = self.comm.bcast(None, root=0)
         self.bds_store[self.__bds_id] = value
+
+        f.write('Broadcast: ' + str(time.time() - start_bcast) + '\n')
 
 
 class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else BackendMPISlave):
@@ -511,6 +528,9 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
+
+        global f
+        f = open('log_%s.csv' % str(self.rank), 'w')
 
         if self.size<2:
             raise ValueError('Please, use at least 2 ranks.')
