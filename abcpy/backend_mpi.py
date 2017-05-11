@@ -440,7 +440,7 @@ class BackendMPISlave(Backend):
 
         pds = PDSMPI(data_chunk, pds_id, self)
 
-        f.write('Parallelize: ' + str(time.time() - start_parallelize) + '\n')
+        f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for: ' + str(pds_id) + '\n')
 
         return pds
 
@@ -473,7 +473,7 @@ class BackendMPISlave(Backend):
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
-        f.write('Map: ' + str(time.time() - start_map) + '\n')
+        f.write('Map: ' + str(time.time() - start_map) + ' for: ' + str(pds_id) + ' and: ' + str(pds_id_new) + '\n')
 
         return pds_res
 
