@@ -478,17 +478,17 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
-        #start_map = time.time()
+        start_map = time.time()
 
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
 
-        #rdd = list(map(func, pds.python_list))
-        rdd = list(map(functools.partial(self.wrapper_map, func), pds.python_list))
+        rdd = list(map(func, pds.python_list))
+        #rdd = list(map(functools.partial(self.wrapper_map, func), pds.python_list))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
-        #f.write('Map: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
+        f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
 
         return pds_res
 
