@@ -162,7 +162,7 @@ class BackendMPIMaster(Backend):
         """
 
         #logging.info("Parallelize_master_start_%s", % str(self.parallelize))
-        logging.info("Parallelize_master_start")
+        logger.info("Parallelize_master_start")
 
         # Tell the slaves to enter parallelize()
         pds_id = self.__generate_new_pds_id()
@@ -181,7 +181,7 @@ class BackendMPIMaster(Backend):
 
         pds = PDSMPI(data_chunk, pds_id, self)
 
-        logging.info("Parallelize_master_end")
+        logger.info("Parallelize_master_end")
 
         return pds
 
@@ -205,7 +205,7 @@ class BackendMPIMaster(Backend):
             a new parallel data set that contains the result of the map
         """
 
-        logging.info("Map_master_start")
+        logger.info("Map_master_start")
 
         # Tell the slaves to enter the map() with the current pds_id & func.
         #Get pds_id of dataset we want to operate on
@@ -221,7 +221,7 @@ class BackendMPIMaster(Backend):
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
-        logging.info("Map_master_end")
+        logger.info("Map_master_end")
 
         return pds_res
 
@@ -445,7 +445,7 @@ class BackendMPISlave(Backend):
         """
 
         #start_parallelize = time.time()
-        logging.info("Parallelize_slave_start")
+        logger.info("Parallelize_slave_start")
 
         #Get the PDS id we should store this data in
         pds_id,pds_id_new = self.__get_received_pds_id()
@@ -455,7 +455,7 @@ class BackendMPISlave(Backend):
         pds = PDSMPI(data_chunk, pds_id, self)
 
         #f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for ' + str(pds_id) + '\n')
-        logging.info("Parallelize_slave_end")
+        logger.info("Parallelize_slave_end")
 
         return pds
 
@@ -493,7 +493,7 @@ class BackendMPISlave(Backend):
         """
 
         #start_map = time.time()
-        logging.info("Map_slave_start")
+        logger.info("Map_slave_start")
 
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
@@ -504,7 +504,7 @@ class BackendMPISlave(Backend):
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
         #f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
-        logging.info("Map_slave_end")
+        logger.info("Map_slave_end")
 
         return pds_res
 
@@ -565,10 +565,11 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         f = open('info_%s.log' % str(self.rank), 'w')
 
         #Logging set-up
+        global logger
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
 
-        handler = logging.FileHandler(f)
+        handler = logging.FileHandler(f.name)
         handler.setLevel(logging.INFO)
 
         formatter = logging.Formatter('%(message)s %(asctime)s %(levelname)s',
