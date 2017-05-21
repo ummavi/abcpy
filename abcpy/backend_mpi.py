@@ -1,11 +1,14 @@
 from abc import ABCMeta, abstractmethod
 from abcpy.backends import Backend,PDS,BDS
-from mpi4py import MPI
-import numpy as np
-import cloudpickle
+
 import sys
 import time
 import functools
+import logging
+
+from mpi4py import MPI
+import numpy as np
+import cloudpickle
 
 
 class BackendMPIMaster(Backend):
@@ -158,6 +161,9 @@ class BackendMPIMaster(Backend):
             A reference object that represents the parallelized list
         """
 
+        #logging.info("Parallelize_master_start_%s", % str(self.parallelize))
+        logging.info("Parallelize_master_start")
+
         # Tell the slaves to enter parallelize()
         pds_id = self.__generate_new_pds_id()
         self.__command_slaves(self.OP_PARALLELIZE,(pds_id,))
@@ -174,6 +180,8 @@ class BackendMPIMaster(Backend):
         data_chunk = self.comm.scatter(rdd, root=0)
 
         pds = PDSMPI(data_chunk, pds_id, self)
+
+        logging.info("Parallelize_master_end")
 
         return pds
 
@@ -197,6 +205,8 @@ class BackendMPIMaster(Backend):
             a new parallel data set that contains the result of the map
         """
 
+        logging.info("Map_master_start")
+
         # Tell the slaves to enter the map() with the current pds_id & func.
         #Get pds_id of dataset we want to operate on
         pds_id = pds.pds_id
@@ -210,6 +220,8 @@ class BackendMPIMaster(Backend):
         rdd = list(map(func, pds.python_list))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
+
+        logging.info("Map_master_end")
 
         return pds_res
 
@@ -432,7 +444,8 @@ class BackendMPISlave(Backend):
             A reference object that represents the parallelized list
         """
 
-        start_parallelize = time.time()
+        #start_parallelize = time.time()
+        logging.info("Parallelize_slave_start")
 
         #Get the PDS id we should store this data in
         pds_id,pds_id_new = self.__get_received_pds_id()
@@ -441,7 +454,8 @@ class BackendMPISlave(Backend):
 
         pds = PDSMPI(data_chunk, pds_id, self)
 
-        f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for ' + str(pds_id) + '\n')
+        #f.write('Parallelize: ' + str(time.time() - start_parallelize) + ' for ' + str(pds_id) + '\n')
+        logging.info("Parallelize_slave_end")
 
         return pds
 
@@ -478,7 +492,8 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
-        start_map = time.time()
+        #start_map = time.time()
+        logging.info("Map_slave_start")
 
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
@@ -488,7 +503,8 @@ class BackendMPISlave(Backend):
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
-        f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
+        #f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
+        logging.info("Map_slave_end")
 
         return pds_res
 
@@ -508,12 +524,12 @@ class BackendMPISlave(Backend):
             all elements of pds as a list
         """
 
-        start_collect = time.time()
+        #start_collect = time.time()
 
         #Send the data we have back to the master
         _ = self.comm.gather(pds.python_list, root=0)
 
-        f.write('Collect: ' + str(time.time() - start_collect) + '\n')
+        #f.write('Collect: ' + str(time.time() - start_collect) + '\n')
 
 
     def broadcast(self,value):
@@ -521,12 +537,12 @@ class BackendMPISlave(Backend):
         Value is ignored for the slaves. We get data from master
         """
 
-        start_bcast = time.time()
+        #start_bcast = time.time()
 
         value = self.comm.bcast(None, root=0)
         self.bds_store[self.__bds_id] = value
 
-        f.write('Broadcast: ' + str(time.time() - start_bcast) + '\n')
+        #f.write('Broadcast: ' + str(time.time() - start_bcast) + '\n')
 
 
 class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else BackendMPISlave):
@@ -544,8 +560,25 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
 
+        #Open one logging file per rank
         global f
-        f = open('log_%s.csv' % str(self.rank), 'w')
+        f = open('info_%s.log' % str(self.rank), 'w')
+
+        #Logging set-up
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+
+        handler = logging.FileHandler(f)
+        handler.setLevel(logging.INFO)
+
+        formatter = logging.Formatter('%(message)s %(asctime)s %(levelname)s',
+                                      datefmt='%H:%M:%S')
+        handler.setFormatter(formatter)
+
+        logger.addHandler(handler)
+
+
+        logger.info('Backend initialized.')
 
         if self.size<2:
             raise ValueError('Please, use at least 2 ranks.')
