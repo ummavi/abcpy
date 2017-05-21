@@ -504,6 +504,8 @@ class BackendMPISlave(Backend):
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
         #f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
+        #func_name = sys._getframe().f_code
+        #logger.info("Map_slave_end_%s" % func_name)
         logger.info("Map_slave_end")
 
         return pds_res
@@ -572,8 +574,8 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         handler = logging.FileHandler(f.name)
         handler.setLevel(logging.INFO)
 
-        formatter = logging.Formatter('%(message)s %(asctime)s %(levelname)s',
-                                      datefmt='%H:%M:%S')
+        formatter = logging.Formatter('%(message)s %(asctime)s.%(msecs)03d %(levelname)s',
+                                       datefmt='%H:%M:%S')
         handler.setFormatter(formatter)
 
         logger.addHandler(handler)
