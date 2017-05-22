@@ -5,10 +5,27 @@ import sys
 import time
 import functools
 import logging
+import datetime as dt
 
 from mpi4py import MPI
 import numpy as np
 import cloudpickle
+
+class MyFormatter(logging.Formatter):
+    """
+    Personal class for logging time information.
+    """
+
+    converter = dt.datetime.fromtimestamp
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            s = ct.strftime(datefmt)
+        else:
+            t = ct.strftime("%H:%M:%S")
+            s = "%03d" % (t, record.msecs)
+        return s
 
 
 class BackendMPIMaster(Backend):
@@ -576,8 +593,8 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         handler = logging.FileHandler(f.name)
         handler.setLevel(logging.INFO)
 
-        formatter = logging.Formatter('%(message)s %(asctime)s.%(msecs)03d %(levelname)s',
-                                       datefmt='%H:%M:%S')
+        #formatter = logging.Formatter('%(message)s %(asctime)s %(levelname)s', datefmt='%H:%M:%S.%f')
+        formatter = MyFormatter(fmt = '%(message)s %(asctime)s %(levelname)s', datefmt = '%H:%M:%S.%f')
         handler.setFormatter(formatter)
 
         logger.addHandler(handler)
