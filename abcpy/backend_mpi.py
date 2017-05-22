@@ -465,11 +465,13 @@ class BackendMPISlave(Backend):
         A wrapper function to measure single map iterations performance
         """
 
-        start_map = time.time()
+        #start_map = time.time()
+        logger.info("Map_slave_item_start")
 
         result = func(data_item)
 
-        f.write('Map_iterate: ' + str(time.time() - start_map) + ' for ' + str(data_item) + '\n')
+        #f.write('Map_iterate: ' + str(time.time() - start_map) + ' for ' + str(data_item) + '\n')
+        logger.info("Map_slave_item_end")
 
         return result
 
@@ -493,20 +495,20 @@ class BackendMPISlave(Backend):
         """
 
         #start_map = time.time()
-        logger.info("Map_slave_start")
+        #logger.info("Map_slave_start")
 
         #Get the PDS id we operate on and the new one to store the result in
         pds_id,pds_id_new = self.__get_received_pds_id()
 
-        rdd = list(map(func, pds.python_list))
-        #rdd = list(map(functools.partial(self.wrapper_map, func), pds.python_list))
+        #rdd = list(map(func, pds.python_list))
+        rdd = list(map(functools.partial(self.wrapper_map, func), pds.python_list))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
         #f.write('Map_ntt: ' + str(time.time() - start_map) + ' from ' + str(pds_id) + ' to ' + str(pds_id_new) + '\n')
         #func_name = sys._getframe().f_code
         #logger.info("Map_slave_end_%s" % func_name)
-        logger.info("Map_slave_end")
+        #logger.info("Map_slave_end")
 
         return pds_res
 
