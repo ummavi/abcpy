@@ -1,9 +1,97 @@
 import numpy as np
 import cloudpickle
+import multiprocessing
+import time
+import os
 
 from mpi4py import MPI
 from abcpy.backends import Backend, PDS, BDS
 
+
+class IterableQueue():
+    def __init__(self,source_queue):
+            self.source_queue = source_queue
+    def __iter__(self):
+        while True:
+            try:
+               yield self.source_queue.get_nowait()
+            except Exception:
+               return
+
+def worker_target(command_q,data_q,result_q):
+    '''Defines the target function the workers for every slave node enter into
+
+    Parameters
+        ----------
+        command_q: multiprocessing.queue
+            a queue of commands the worker listens to continuously from the node master
+            commands are of the form (command_type,**data)
+            (OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
+            (OP_BROADCAST,bds_id,data) is to create a BDS of bds_id with data data
+            (OP_MAP,func) is to perform a map function on singular items
+                popped off the shared, multiprocessing data_q and place them in the
+                shared result_queue
+            (OP_FINISH,) is to tell the worker to break out of the loop and die.
+    '''
+    _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
+
+    class be:
+        def __init__(self):
+            self.bds_store = {}
+            self.rank = os.getpid()
+
+
+    # backend = be()
+    
+    globals()['backend'] = be()
+    pid =  os.getpid()
+    print("Started worker with pid",pid)
+    while True:
+        # print(pid,"Waiting for a command in queue")
+        command = command_q.get()
+        # print(pid,"Got command",command)
+
+        if command[0] == OP_MAP:
+            # print(pid,"Got map.")
+
+            _,func_packed = command
+
+            func =  cloudpickle.loads(func_packed)
+            #Wrap the function to write into the result_q automatically
+            # def func_write_res(*args, **kwargs):
+                # result_q.put(func(*args, **kwargs))
+
+            #Iterate through the queue calling data_q.get()s
+            #and write every result into the result_qu
+            try:
+                res = map(func,IterableQueue(data_q))
+            except Exception as e:
+                print("Worker",pid," ran into an error ",e)
+
+            for ele in res:
+                result_q.put(ele)
+
+        elif command[0] == OP_BROADCAST:
+
+            #Write the BDS data directly into the bds_store
+            _,bds_id,data = command
+            print(pid,"Got new BDS","with bds_id",bds_id)
+
+            backend.bds_store[bds_id] = data
+
+        elif command[0] == OP_DELETEBDS:
+            # print(pid,"Got delete BDS")
+
+            _,bds_id = command
+            del backend.bds_store[bds_id]
+
+        elif command[0] == OP_FINISH:
+            # print(pid,"Got Finish")
+            break
+        else:
+            print("Invalid command!")
+
+    
 class BackendMPIMaster(Backend):
     """Defines the behavior of the master process
 
@@ -312,20 +400,47 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self):
+    def __init__(self,num_subprocesses=2):
+
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
-
         #Define the vars that will hold the pds ids received from master to operate on
         self.__rec_pds_id = None
         self.__rec_pds_id_result = None
 
+
         #Initialize a BDS store for both master & slave.
         self.bds_store = {}
 
+        self.worker_processes = []
+        self.worker_command_queues = []
+
+        self.data_q = multiprocessing.Queue()
+        self.result_q = multiprocessing.Queue()
+
+        for i in range(num_subprocesses):
+            command_q = multiprocessing.Queue()
+            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q))
+            p.start()
+
+            self.worker_processes+=[p]
+            self.worker_command_queues+=[command_q]
+
         #Go into an infinite loop waiting for commands from the user.
         self.slave_run()
+
+
+
+    def __broadcast_command_to_workers(self,command):
+        """
+        This method iterates through all the workers and places the command
+        command in their command_queus 
+        """
+        # print("Broadcasting command",command)
+        for i,q in enumerate(self.worker_command_queues):
+            # print ("Pushing command to process",i)
+            q.put(command)
 
 
     def slave_run(self):
@@ -343,7 +458,7 @@ class BackendMPISlave(Backend):
         and the rest are conditional on the operation.
 
         (op,pds_id) where op == OP_PARALLELIZE for parallelize
-        (op,pds_id, pds_id_result,func) where op == OP_MAP for map.
+        (op,pds_id, pds_id_result, data_q, func) where op == OP_MAP for map.
         (op,pds_id) where op == OP_COLLECT for a collect operation
         (op,pds_id) where op == OP_DELETEPDS for a delete of the remote PDS on slaves
         (op,) where op==OP_FINISH for the slave to break out of the loop and terminate
@@ -368,7 +483,7 @@ class BackendMPISlave(Backend):
                 self.__rec_pds_id, self.__rec_pds_id_result = pds_id, pds_id_result
 
                 #Use cloudpickle to convert back function string to a function
-                func = cloudpickle.loads(function_packed)
+                # func = cloudpickle.loads(function_packed)
                 #Set the function's backend to current class
                 #so it can access bds_store properly
                 # func.backend = self
@@ -376,7 +491,7 @@ class BackendMPISlave(Backend):
 
                 # Access an existing PDS
                 pds = self.pds_store[pds_id]
-                pds_res = self.map(func, pds)
+                pds_res = self.map(function_packed, pds)
 
                 # Store the result in a newly gnerated PDS pds_id
                 self.pds_store[pds_res.pds_id] = pds_res
@@ -401,7 +516,23 @@ class BackendMPISlave(Backend):
                 bds_id = data[1]
                 del self.bds_store[bds_id]
 
+                #Tell the worker processes to delete a BDS
+                #(OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
+
+                data_packet = (self.OP_DELETEBDS,bds_id)
+                self.__broadcast_command_to_workers(data_packet)
+
             elif op == self.OP_FINISH:
+                #Tell the worker processes to break out of their loops and die.
+                # (OP_FINISH,) is to tell the worker to break out of the loop and die.
+                data_packet = (self.OP_FINISH,)
+                self.__broadcast_command_to_workers(data_packet)
+
+                #Wait for the processes to finish
+                for p in self.worker_processes:
+                    p.join()
+
+                #Quit as usual
                 quit()
             else:
                 raise Exception("Slave recieved unknown command code")
@@ -469,10 +600,37 @@ class BackendMPISlave(Backend):
         #Get the PDS id we operate on and the new one to store the result in
         pds_id, pds_id_new = self.__get_received_pds_id()
 
-        rdd = list(map(func, pds.python_list))
+
+        #Initialize a common data_q and result_q for all the slaves to pop data off
+        #  and to place their results in
+        total_data_elements = len(pds.python_list)
+
+
+        #Create a data packet to send the workers
+        # (OP_MAP,func,data_q,result_q) is to perform a map function on singular items
+        worker_data_packet = (self.OP_MAP,func)
+
+        #Send it off to the workers
+        self.__broadcast_command_to_workers(worker_data_packet)
+
+        # print("Finished brodcasting. Now populating with ",total_data_elements)
+
+        #Populate the data_q with the data that needs to be distributed
+        for element in pds.python_list:
+            self.data_q.put(element)
+
+        # print ("Finished populating. Waiting for result_q to fill up")
+        #Wait till the result queue is fully populated 
+        rdd = []
+        while len(rdd)<total_data_elements:
+            print(">>>>>>>",len(rdd))
+            rdd+= [e for e in IterableQueue(self.result_q)]
+            # time.sleep(0.0001)
+
+        #Go through the results and pop them out into a list
+        # rdd = [e for e in IterableQueue(self.result_q)]
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
-
         return pds_res
 
 
@@ -502,6 +660,11 @@ class BackendMPISlave(Backend):
         """
         value = self.comm.bcast(None, root=0)
         self.bds_store[self.__bds_id] = value
+
+        #Tell the workers a new BDS has arrived
+        # (OP_BROADCAST,bds_id,data) is to create a BDS of bds_id with data data
+        data_packet = (self.OP_BROADCAST,self.__bds_id,value)
+        self.__broadcast_command_to_workers(data_packet)
 
 
 class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else BackendMPISlave):
@@ -565,6 +728,8 @@ class BDSMPI(BDS):
     def __init__(self, object, bds_id, backend_obj):
         #The BDS data is no longer saved in the BDS object.
         #It will access & store the data only from the current backend
+        # print("BDS created called for rank",backend.rank,os.getpid(),"ID:",bds_id)
+
         self.bds_id = bds_id
         backend.bds_store[self.bds_id] = object
         # self.backend_obj = backend_obj
@@ -573,6 +738,7 @@ class BDSMPI(BDS):
         """
         This method returns the actual object that the broadcast data set represents.
         """
+        # print("BDS Value called for rank",backend.rank,os.getpid())
         return backend.bds_store[self.bds_id]
 
     def __del__(self):
