@@ -484,7 +484,7 @@ class BackendMPISlave(Backend):
         and the rest are conditional on the operation.
 
         (op,pds_id) where op == OP_PARALLELIZE for parallelize
-        (op,pds_id, pds_id_result, data_q, func) where op == OP_MAP for map.
+        (op,pds_id, pds_id_result, func) where op == OP_MAP for map.
         (op,pds_id) where op == OP_COLLECT for a collect operation
         (op,pds_id) where op == OP_DELETEPDS for a delete of the remote PDS on slaves
         (op,) where op==OP_FINISH for the slave to break out of the loop and terminate
@@ -543,14 +543,11 @@ class BackendMPISlave(Backend):
                 del self.bds_store[bds_id]
 
                 #Tell the worker processes to delete a BDS
-                #(OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
-
                 data_packet = (self.OP_DELETEBDS,bds_id)
                 self.__broadcast_command_to_workers(data_packet)
 
             elif op == self.OP_FINISH:
                 #Tell the worker processes to break out of their loops and die.
-                # (OP_FINISH,) is to tell the worker to break out of the loop and die.
                 data_packet = (self.OP_FINISH,)
                 self.__broadcast_command_to_workers(data_packet)
 
@@ -633,7 +630,6 @@ class BackendMPISlave(Backend):
 
 
         #Create a data packet to send the workers
-        # (OP_MAP,func,data_q,result_q) is to perform a map function on singular items
         worker_data_packet = (self.OP_MAP,func)
 
         #So the workers know a map is in progress
@@ -644,7 +640,6 @@ class BackendMPISlave(Backend):
         self.__broadcast_command_to_workers(worker_data_packet)
 
         # print("Finished brodcasting. Now populating with ",total_data_elements)
-
         #Populate the data_q with the data that needs to be distributed
         for element in pds.python_list:
             self.data_q.put(element)
@@ -652,15 +647,6 @@ class BackendMPISlave(Backend):
         # print ("Finished populating. Waiting for result_q to fill up")
         #Wait till the result queue is fully populated 
         rdd = []
-        # while len(rdd)<total_data_elements:
-        #     #Go around and grab data from any of the workers that have finished.
-        #     for r_q in self.worker_result_queues:
-        #         while True:
-        #             if r_q.empty():
-        #                 break
-        #             else:
-        #                 rdd+=[r_q.get()]
-
         while len(rdd)<total_data_elements:
             # print("len(rdd)",len(rdd),"/",total_data_elements)
             rdd+=[e for e in  IterableQueue(self.result_q)]
@@ -703,7 +689,6 @@ class BackendMPISlave(Backend):
         self.bds_store[self.__bds_id] = value
 
         #Tell the workers a new BDS has arrived
-        # (OP_BROADCAST,bds_id,data) is to create a BDS of bds_id with data data
         data_packet = (self.OP_BROADCAST,self.__bds_id,value)
         self.__broadcast_command_to_workers(data_packet)
 
