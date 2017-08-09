@@ -18,79 +18,6 @@ class IterableQueue():
             except Exception:
                return
 
-def worker_target(command_q,data_q,result_q):
-    '''Defines the target function the workers for every slave node enter into
-
-    Parameters
-        ----------
-        command_q: multiprocessing.queue
-            a queue of commands the worker listens to continuously from the node master
-            commands are of the form (command_type,**data)
-            (OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
-            (OP_BROADCAST,bds_id,data) is to create a BDS of bds_id with data data
-            (OP_MAP,func) is to perform a map function on singular items
-                popped off the shared, multiprocessing data_q and place them in the
-                shared result_queue
-            (OP_FINISH,) is to tell the worker to break out of the loop and die.
-    '''
-    _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
-
-    class be:
-        def __init__(self):
-            self.bds_store = {}
-            self.rank = os.getpid()
-
-
-    # backend = be()
-    
-    globals()['backend'] = be()
-    pid =  os.getpid()
-    print("Started worker with pid",pid)
-    while True:
-        # print(pid,"Waiting for a command in queue")
-        command = command_q.get()
-        # print(pid,"Got command",command)
-
-        if command[0] == OP_MAP:
-            # print(pid,"Got map.")
-
-            _,func_packed = command
-
-            func =  cloudpickle.loads(func_packed)
-            #Wrap the function to write into the result_q automatically
-            # def func_write_res(*args, **kwargs):
-                # result_q.put(func(*args, **kwargs))
-
-            #Iterate through the queue calling data_q.get()s
-            #and write every result into the result_qu
-            try:
-                res = map(func,IterableQueue(data_q))
-            except Exception as e:
-                print("Worker",pid," ran into an error ",e)
-
-            for ele in res:
-                result_q.put(ele)
-
-        elif command[0] == OP_BROADCAST:
-
-            #Write the BDS data directly into the bds_store
-            _,bds_id,data = command
-            print(pid,"Got new BDS","with bds_id",bds_id)
-
-            backend.bds_store[bds_id] = data
-
-        elif command[0] == OP_DELETEBDS:
-            # print(pid,"Got delete BDS")
-
-            _,bds_id = command
-            del backend.bds_store[bds_id]
-
-        elif command[0] == OP_FINISH:
-            # print(pid,"Got Finish")
-            break
-        else:
-            print("Invalid command!")
-
     
 class BackendMPIMaster(Backend):
     """Defines the behavior of the master process
@@ -389,6 +316,105 @@ class BackendMPIMaster(Backend):
         self.finalized = True
 
 
+
+def worker_target(command_q,data_q,result_q,map_in_progress):
+    '''Defines the target function the workers for every slave node enter into
+
+    Parameters
+        ----------
+        command_q: multiprocessing.queue
+            a queue of commands the worker listens to continuously from the node master
+            commands are of the form (command_type,**data)
+            (OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
+            (OP_BROADCAST,bds_id,data) is to create a BDS of bds_id with data data
+            (OP_MAP,func) is to perform a map function on singular items
+                popped off the shared, multiprocessing data_q and place them in the
+                shared result_queue
+            (OP_FINISH,) is to tell the worker to break out of the loop and die.
+
+        data_q: multiprocessing.queue
+            a queue to grab data off the master while map is still going on
+
+        result_q: multiprocessing.queue
+            a queue to push the results of the worker back to the parent
+
+        map_in_progress: multiprocessing.value
+            a flag to see if a map is in progress 
+    '''
+    _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
+
+    class be:
+        def __init__(self):
+            self.bds_store = {}
+            self.pds_store = {}
+            self.rank = os.getpid()
+
+
+    # backend = be()
+    
+    globals()['backend'] = be()
+    pid =  os.getpid()
+    print("Started worker with pid",pid)
+
+    while True:
+        # print(pid,"Waiting for a command in queue")
+        command = command_q.get()
+        # print(pid,"Got command",command[0])
+
+        if command[0] == OP_MAP:
+            # print(pid,"Got map.")
+
+            _,func_packed = command
+
+            func =  cloudpickle.loads(func_packed)
+            #Wrap the function to write into the result_q automatically
+            def func_write_res(*args, **kwargs):
+                result_q.put(func(*args, **kwargs))
+
+            #Iterate through the queue calling data_q.get()s
+            #and write every result into the result_qu
+            try:
+                while map_in_progress.value:
+                    res = map(func,IterableQueue(data_q))
+                    [result_q.put(r) for r in res] 
+                # while True:
+                #     if not map_in_progress.value :
+                #         # print(pid,"Map finished")
+                #         break
+                #     else:
+                #         #Try to grab as may off the queue as possible without having to continuously hit
+                #         # map_in_progress
+                #                                 # res = map(func_write_res,IterableQueue(data_q))
+                #         while True:
+                #             try: 
+                #                 data_chunk = data_q.get_nowait()
+                #                 result_q.put(func(data_chunk))
+                #             except Exception as e:
+                #                 break
+
+            except Exception as e:
+                Exception("Worker",pid," ran into an error ",e)
+
+        elif command[0] == OP_BROADCAST:
+
+            #Write the BDS data directly into the bds_store
+            _,bds_id,data = command
+            # print(pid,"Got new BDS","with bds_id",bds_id)
+
+            backend.bds_store[bds_id] = data
+
+        elif command[0] == OP_DELETEBDS:
+            # print(pid,"Got delete BDS")
+
+            _,bds_id = command
+            del backend.bds_store[bds_id]
+
+        elif command[0] == OP_FINISH:
+            print(pid,"Got Finish")
+            break
+        else:
+            print("Invalid command!")
+
 class BackendMPISlave(Backend):
     """Defines the behavior of the slaves processes
 
@@ -415,17 +441,22 @@ class BackendMPISlave(Backend):
 
         self.worker_processes = []
         self.worker_command_queues = []
+        self.worker_result_queues = []
 
         self.data_q = multiprocessing.Queue()
+        self.map_in_progress = multiprocessing.Value('b',0)
         self.result_q = multiprocessing.Queue()
 
         for i in range(num_subprocesses):
             command_q = multiprocessing.Queue()
-            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q))
+            result_q = multiprocessing.Queue()
+
+            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,self.map_in_progress))
             p.start()
 
             self.worker_processes+=[p]
             self.worker_command_queues+=[command_q]
+            # self.worker_result_queues+=[result_q]
 
         #Go into an infinite loop waiting for commands from the user.
         self.slave_run()
@@ -610,6 +641,10 @@ class BackendMPISlave(Backend):
         # (OP_MAP,func,data_q,result_q) is to perform a map function on singular items
         worker_data_packet = (self.OP_MAP,func)
 
+        #So the workers know a map is in progress
+        self.map_in_progress.value = True
+
+
         #Send it off to the workers
         self.__broadcast_command_to_workers(worker_data_packet)
 
@@ -622,10 +657,21 @@ class BackendMPISlave(Backend):
         # print ("Finished populating. Waiting for result_q to fill up")
         #Wait till the result queue is fully populated 
         rdd = []
+        # while len(rdd)<total_data_elements:
+        #     #Go around and grab data from any of the workers that have finished.
+        #     for r_q in self.worker_result_queues:
+        #         while True:
+        #             if r_q.empty():
+        #                 break
+        #             else:
+        #                 rdd+=[r_q.get()]
+
         while len(rdd)<total_data_elements:
-            print(">>>>>>>",len(rdd))
-            rdd+= [e for e in IterableQueue(self.result_q)]
-            # time.sleep(0.0001)
+            # print("len(rdd)",len(rdd),"/",total_data_elements)
+            rdd+=[e for e in  IterableQueue(self.result_q)]
+
+        # print("rdd",rdd)
+        self.map_in_progress.value = False
 
         #Go through the results and pop them out into a list
         # rdd = [e for e in IterableQueue(self.result_q)]
