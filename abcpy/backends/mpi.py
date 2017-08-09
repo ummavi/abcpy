@@ -9,6 +9,11 @@ from abcpy.backends import Backend, PDS, BDS
 
 
 class IterableQueue():
+    """
+    An iterator to a multiprocessing.Queue().
+    A normal q.get() call blocks until we get data while the get_nowait() 
+    doesn't but raises on exception on empty. We break the iterator then.
+    """
     def __init__(self,source_queue):
             self.source_queue = source_queue
     def __iter__(self):
@@ -339,18 +344,24 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
             a queue to push the results of the worker back to the parent
 
         map_in_progress: multiprocessing.value
-            a flag to see if a map is in progress 
+            a flag to see if a map is in progress or not. Used to decide if data_q 
+            is empty because it wasn't populated fully yet or the map is really
+            over. 
     '''
     _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
     class be:
+        """
+        A pseudo backend class for the workers. 
+        We set an instance of this as the global "backend" so when we access a BDS in a map and it
+        tries hit globals().backend.bds_store[], it exists.
+        """
         def __init__(self):
             self.bds_store = {}
             self.pds_store = {}
-            self.rank = os.getpid()
+            self.rank = os.getpid() #Debugging var. Don't expect PIDs to be small like with rank ids.
 
 
-    # backend = be()
     
     globals()['backend'] = be()
     pid =  os.getpid()
@@ -359,41 +370,22 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
     while True:
         # print(pid,"Waiting for a command in queue")
         command = command_q.get()
-        # print(pid,"Got command",command[0])
 
         if command[0] == OP_MAP:
+
             # print(pid,"Got map.")
 
             _,func_packed = command
-
             func =  cloudpickle.loads(func_packed)
-            #Wrap the function to write into the result_q automatically
-            def func_write_res(*args, **kwargs):
-                result_q.put(func(*args, **kwargs))
 
             #Iterate through the queue calling data_q.get()s
             #and write every result into the result_qu
             try:
                 while map_in_progress.value:
                     res = map(func,IterableQueue(data_q))
-                    [result_q.put(r) for r in res] 
-                # while True:
-                #     if not map_in_progress.value :
-                #         # print(pid,"Map finished")
-                #         break
-                #     else:
-                #         #Try to grab as may off the queue as possible without having to continuously hit
-                #         # map_in_progress
-                #                                 # res = map(func_write_res,IterableQueue(data_q))
-                #         while True:
-                #             try: 
-                #                 data_chunk = data_q.get_nowait()
-                #                 result_q.put(func(data_chunk))
-                #             except Exception as e:
-                #                 break
-
+                    _ = [result_q.put(r) for r in res]
             except Exception as e:
-                Exception("Worker",pid," ran into an error ",e)
+                Exception("Worker",pid," ran into an error during map ",e)
 
         elif command[0] == OP_BROADCAST:
 
@@ -439,24 +431,27 @@ class BackendMPISlave(Backend):
         #Initialize a BDS store for both master & slave.
         self.bds_store = {}
 
+        #Define a list to hold the private queues for each worker proc.
         self.worker_processes = []
         self.worker_command_queues = []
-        self.worker_result_queues = []
 
+        #Define the shared queues/vars the worker procs need.
         self.data_q = multiprocessing.Queue()
         self.map_in_progress = multiprocessing.Value('b',0)
         self.result_q = multiprocessing.Queue()
 
         for i in range(num_subprocesses):
+            #Initialize a local(private) command queue for each subproc
             command_q = multiprocessing.Queue()
-            result_q = multiprocessing.Queue()
 
+            #Create a process, tell it to start running the worker_target function
+            # and pass it all it's shared queues/datas
             p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,self.map_in_progress))
             p.start()
 
+            #Save the private queues for each subproc so we can communicate
             self.worker_processes+=[p]
             self.worker_command_queues+=[command_q]
-            # self.worker_result_queues+=[result_q]
 
         #Go into an infinite loop waiting for commands from the user.
         self.slave_run()
