@@ -8,10 +8,9 @@ from operator import itemgetter
 from mpi4py import MPI
 from abcpy.backends import Backend, PDS, BDS
 
-
 class IterableQueue():
     """
-    An iterator to a multiprocessing.Queue().
+    An iterator over a multiprocessing.Queue().
     A normal q.get() call blocks until we get data while the get_nowait() 
     doesn't but raises on exception on empty. We break the iterator then.
     """
@@ -36,6 +35,12 @@ class BackendMPIMaster(Backend):
     #Define some operation codes to make it more readable
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
     finalized = False
+
+    try:
+        os.mkdir("logs")
+    except Exception as e:
+        print("folder logs/ already exists")
+        pass
 
     def __init__(self, master_node_ranks=[0]):
 
@@ -326,7 +331,7 @@ class BackendMPIMaster(Backend):
 
 
 
-def worker_target(command_q,data_q,result_q,map_in_progress):
+def worker_target(command_q,data_q,result_q,map_in_progress,worker_id):
     '''Defines the target function the workers for every slave node enter into
 
     Parameters
@@ -351,6 +356,8 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
             a flag to see if a map is in progress or not. Used to decide if data_q 
             is empty because it wasn't populated fully yet or the map is really
             over. 
+
+        worker_id: Number to correspond to a worker level id. Like how ranks were before.
     '''
     _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
@@ -363,7 +370,7 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
         def __init__(self):
             self.bds_store = {}
             self.pds_store = {}
-            self.rank = os.getpid() #Debugging var. Don't expect PIDs to be small like with rank ids.
+            self.rank = worker_id #Debugging var. Don't expect PIDs to be small like with rank ids.
 
 
     def map_over_queue():
@@ -378,14 +385,16 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
 
     globals()['backend'] = pseudo_worker_backend()
     pid =  os.getpid()
-    print("Started worker with pid",pid)
+    print("Started worker with pid",pid," worker id:",worker_id)
+
+    log_fd = open("logs/worker_"+str(worker_id),"w")
 
     while True:
         # print(pid,"Waiting for a command in queue")
         command = command_q.get()
 
         if command[0] == OP_MAP:
-
+            map_start = time.time()
             # print(pid,"Got map.")
             _,func_packed = command
             func =  cloudpickle.loads(func_packed)
@@ -396,6 +405,9 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
                 map_over_queue()
             except Exception as e:
                 Exception("Worker",pid," ran into an error during map ",e)
+
+            #Write at the end to not mess with timing results.    
+            log_fd.write("MAP_START "+str(map_start)+"\nMAP_END "+str(map_start)+"\n")
 
         elif command[0] == OP_BROADCAST:
 
@@ -428,7 +440,7 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self,num_subprocesses=2):
+    def __init__(self,num_subprocesses=36):
 
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
@@ -450,13 +462,16 @@ class BackendMPISlave(Backend):
         self.map_in_progress = multiprocessing.Value('b',0)
         self.result_q = multiprocessing.Queue()
 
+        self.log_fd = open("logs/node_"+str(self.rank),"w")
+
         for i in range(num_subprocesses):
             #Initialize a local(private) command queue for each subproc
             command_q = multiprocessing.Queue()
 
+            worker_id = self.rank*100+i
             #Create a process, tell it to start running the worker_target function
             # and pass it all it's shared queues/datas
-            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,self.map_in_progress))
+            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,self.map_in_progress,worker_id))
             p.start()
 
             #Save the private queues for each subproc so we can communicate
@@ -631,6 +646,7 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
+        MAP_START = time.time()
         #Get the PDS id we operate on and the new one to store the result in
         pds_id, pds_id_new = self.__get_received_pds_id()
 
@@ -649,10 +665,15 @@ class BackendMPISlave(Backend):
         #Send it off to the workers
         self.__broadcast_command_to_workers(worker_data_packet)
 
+        MAP_SENT_COMMAND = time.time()
+
         # print("Finished brodcasting. Now populating with ",total_data_elements)
         #Populate the data_q with the data that needs to be distributed
         for item_index,item_data in enumerate(pds.python_list):
             self.data_q.put((item_index,item_data))
+
+        MAP_SENT_DATA = time.time()
+
 
         # print ("Finished populating. Waiting for result_q to fill up")
         #Wait till the result queue is fully populated 
@@ -663,9 +684,11 @@ class BackendMPISlave(Backend):
             # print("len(rdd)",len(rdd),"/",total_data_elements)
             for e in  IterableQueue(self.result_q):
                 item_index,item_res = e
-                print("Got a result",e)
+                # print("Got a result",e)
                 rdd_indices+=[item_index]
                 rdd+=[item_res]
+
+        MAP_REVC_DATA = time.time()
 
         self.map_in_progress.value = False
 
@@ -677,6 +700,11 @@ class BackendMPISlave(Backend):
 
         # print("Rdd sorted",rdd_sorted)
         pds_res = PDSMPI(rdd_sorted, pds_id_new, self)
+        MAP_DONE = time.time()
+
+
+        data =    "MAP_START "+str(MAP_START)+"\nMAP_SENT_COMMAND "+str(MAP_SENT_COMMAND)+"\nMAP_SENT_DATA "+str(MAP_SENT_DATA)+"\nMAP_REVC_DATA "+str(MAP_REVC_DATA)+"\nMAP_DONE "+str(MAP_DONE)+"\n"
+        self.log_fd.write(data)
         return pds_res
 
 
