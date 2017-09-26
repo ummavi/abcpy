@@ -407,7 +407,7 @@ def worker_target(command_q,data_q,result_q,map_in_progress,worker_id):
                 Exception("Worker",pid," ran into an error during map ",e)
 
             #Write at the end to not mess with timing results.    
-            log_fd.write("MAP_START "+str(map_start)+"\nMAP_END "+str(map_start)+"\n")
+            log_fd.write("MAP_START "+str(map_start)+"\nMAP_END "+str(time.time())+"\n")
 
         elif command[0] == OP_BROADCAST:
 
