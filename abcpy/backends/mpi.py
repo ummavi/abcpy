@@ -3,6 +3,7 @@ import cloudpickle
 import multiprocessing
 import time
 import os
+from operator import itemgetter
 
 from mpi4py import MPI
 from abcpy.backends import Backend, PDS, BDS
@@ -174,6 +175,7 @@ class BackendMPIMaster(Backend):
             A reference object that represents the parallelized list
         """
 
+        # print("Parallelize called on",python_list)
         # Tell the slaves to enter parallelize()
         pds_id = self.__generate_new_pds_id()
         self.__command_slaves(self.OP_PARALLELIZE, (pds_id,))
@@ -186,6 +188,7 @@ class BackendMPIMaster(Backend):
 
         #Combine the lists into the final rdd before we split it across all ranks.
         rdd = rdd_masters + rdd_slaves
+        # print("Sent data chunk",rdd)
 
         data_chunk = self.comm.scatter(rdd, root=0)
 
@@ -223,9 +226,8 @@ class BackendMPIMaster(Backend):
         data = (pds_id, pds_id_new, func)
         self.__command_slaves(self.OP_MAP, data)
 
-        rdd = list(map(func, pds.python_list))
-
-        pds_res = PDSMPI(rdd, pds_id_new, self)
+        #Master doesn't do any computations. Just have no data in the pds_res.
+        pds_res = PDSMPI([], pds_id_new, self)
 
         return pds_res
 
@@ -257,6 +259,8 @@ class BackendMPIMaster(Backend):
         # .. dimensional output (which is why we cannot use np.flatten)
         combined_result = []
         list(map(combined_result.extend, python_list))
+
+        # print("Collect got",combined_result)
         return combined_result
 
 
@@ -350,7 +354,7 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
     '''
     _, OP_MAP, _, OP_BROADCAST, _, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
-    class be:
+    class pseudo_worker_backend:
         """
         A pseudo backend class for the workers. 
         We set an instance of this as the global "backend" so when we access a BDS in a map and it
@@ -362,8 +366,17 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
             self.rank = os.getpid() #Debugging var. Don't expect PIDs to be small like with rank ids.
 
 
-    
-    globals()['backend'] = be()
+    def map_over_queue():
+        # print("Initiating map over queue")
+        #Function to run a map over the shared queue 
+        while map_in_progress.value:
+            res = []
+            for data_item in IterableQueue(data_q):
+                item_index,item_data = data_item
+                item_res = func(item_data)
+                result_q.put((item_index,item_res))
+
+    globals()['backend'] = pseudo_worker_backend()
     pid =  os.getpid()
     print("Started worker with pid",pid)
 
@@ -374,16 +387,13 @@ def worker_target(command_q,data_q,result_q,map_in_progress):
         if command[0] == OP_MAP:
 
             # print(pid,"Got map.")
-
             _,func_packed = command
             func =  cloudpickle.loads(func_packed)
 
             #Iterate through the queue calling data_q.get()s
             #and write every result into the result_qu
             try:
-                while map_in_progress.value:
-                    res = map(func,IterableQueue(data_q))
-                    _ = [result_q.put(r) for r in res]
+                map_over_queue()
             except Exception as e:
                 Exception("Worker",pid," ran into an error during map ",e)
 
@@ -596,6 +606,7 @@ class BackendMPISlave(Backend):
 
         data_chunk = self.comm.scatter(None, root=0)
 
+        # print("Slave got data chunk",data_chunk)
         pds = PDSMPI(data_chunk, pds_id, self)
 
         return pds
@@ -628,7 +639,6 @@ class BackendMPISlave(Backend):
         #  and to place their results in
         total_data_elements = len(pds.python_list)
 
-
         #Create a data packet to send the workers
         worker_data_packet = (self.OP_MAP,func)
 
@@ -641,23 +651,32 @@ class BackendMPISlave(Backend):
 
         # print("Finished brodcasting. Now populating with ",total_data_elements)
         #Populate the data_q with the data that needs to be distributed
-        for element in pds.python_list:
-            self.data_q.put(element)
+        for item_index,item_data in enumerate(pds.python_list):
+            self.data_q.put((item_index,item_data))
 
         # print ("Finished populating. Waiting for result_q to fill up")
         #Wait till the result queue is fully populated 
         rdd = []
+        rdd_indices = []
+
         while len(rdd)<total_data_elements:
             # print("len(rdd)",len(rdd),"/",total_data_elements)
-            rdd+=[e for e in  IterableQueue(self.result_q)]
+            for e in  IterableQueue(self.result_q):
+                item_index,item_res = e
+                print("Got a result",e)
+                rdd_indices+=[item_index]
+                rdd+=[item_res]
 
-        # print("rdd",rdd)
         self.map_in_progress.value = False
 
-        #Go through the results and pop them out into a list
-        # rdd = [e for e in IterableQueue(self.result_q)]
+        # print("Got rdd",rdd)
+        # print("got rdd indices",rdd_indices)
 
-        pds_res = PDSMPI(rdd, pds_id_new, self)
+        #Sort the RDD back to the right order
+        rdd_sorted = [rdd[i] for i in np.argsort(rdd_indices)]
+
+        # print("Rdd sorted",rdd_sorted)
+        pds_res = PDSMPI(rdd_sorted, pds_id_new, self)
         return pds_res
 
 
