@@ -57,26 +57,26 @@ class MPIBackendTests(unittest.TestCase):
         pds_m = backend_mpi.map(test_map, pds)
         self.assertTrue(backend_mpi.collect(pds_m)==[101,102,103,104,105])
 
-    def test_pds_delete(self):
+    # def test_pds_delete(self):
+    #     #No longer works because slaves don't have PDSes, the workers for the slaves do.
+    #     def check_if_exists(x):
+    #         obj = BackendMPITestHelper()
+    #         return obj.check_pds(x)
 
-        def check_if_exists(x):
-            obj = BackendMPITestHelper()
-            return obj.check_pds(x)
+    #     data = [1,2,3,4,5]
+    #     pds = backend_mpi.parallelize(data)
 
-        data = [1,2,3,4,5]
-        pds = backend_mpi.parallelize(data)
+    #     #Check if the pds we just created exists in all the slaves(+master)
 
-        #Check if the pds we just created exists in all the slaves(+master)
+    #     id_check_pds = backend_mpi.parallelize([pds.pds_id]*5)
+    #     pds_check_result = backend_mpi.map(check_if_exists, id_check_pds)
+    #     self.assertTrue(False not in backend_mpi.collect(pds_check_result),"PDS was not created")
 
-        id_check_pds = backend_mpi.parallelize([pds.pds_id]*5)
-        pds_check_result = backend_mpi.map(check_if_exists, id_check_pds)
-        self.assertTrue(False not in backend_mpi.collect(pds_check_result),"PDS was not created")
+    #     #Delete the PDS on master and try again
+    #     del pds
+    #     pds_check_result = backend_mpi.map(check_if_exists,id_check_pds)
 
-        #Delete the PDS on master and try again
-        del pds
-        pds_check_result = backend_mpi.map(check_if_exists,id_check_pds)
-
-        self.assertTrue(True not in backend_mpi.collect(pds_check_result),"PDS was not deleted")
+    #     self.assertTrue(True not in backend_mpi.collect(pds_check_result),"PDS was not deleted")
 
 
     def test_bds_delete(self):
@@ -135,4 +135,5 @@ class MPIBackendTests(unittest.TestCase):
         obj = nonstaticfunctest()
         pds_map4 = backend_mpi.map(obj.square ,pds)
         pds_res4 = backend_mpi.collect(pds_map4)
+        print("PDS_RES4=",pds_res4,"Expected result",expected_result,"Equal?",pds_res4==expected_result)
         self.assertTrue(pds_res4==expected_result,"Failed pickle test for non-static function")
