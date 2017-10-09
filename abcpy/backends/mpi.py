@@ -440,7 +440,7 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self,num_subprocesses=36):
+    def __init__(self,num_subprocesses=multiprocessing.cpu_count()):
 
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
