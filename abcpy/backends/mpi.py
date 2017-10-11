@@ -1,5 +1,6 @@
 import numpy as np
 import cloudpickle
+import pickle
 import multiprocessing
 import time
 import os
@@ -35,21 +36,21 @@ class BackendMPIMaster(Backend):
     #Define some operation codes to make it more readable
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
     finalized = False
-
-    try:
-        os.mkdir("logs")
-    except Exception as e:
-        print("folder logs/ already exists")
-        pass
-
     def __init__(self, master_node_ranks=[0]):
+
+
+
 
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
 
         self.master_node_ranks = master_node_ranks
+        
+        print("Using a dirty version of the Dynamic Scheduler from ummavi's git repo") 
 
+        print("Initialized a Backend MASTER with rank",self.rank)
+        
         #Initialize the current_pds_id and bds_id
         self.__current_pds_id = 0
         self.__current_bds_id = 0
@@ -78,6 +79,7 @@ class BackendMPIMaster(Backend):
             data_packet = (command, data[0])
 
         elif command == self.OP_MAP:
+            print(time.time(),"Master telling slaves to MAP")
             #In map we receive data as (pds_id,pds_id_new,func)
             #Use cloudpickle to dump the function into a string.
             function_packed = self.__sanitize_and_pack_func(data[2])
@@ -121,7 +123,7 @@ class BackendMPIMaster(Backend):
         #Set the backend to None to prevent it from being packed
         globals()['backend'] = {}
 
-        function_packed = cloudpickle.dumps(func)
+        function_packed = cloudpickle.dumps(func,pickle.HIGHEST_PROTOCOL)
 
         #Reset the backend to self after it's been packed
         globals()['backend'] = self
@@ -253,6 +255,7 @@ class BackendMPIMaster(Backend):
             all elements of pds as a list
         """
 
+        print(time.time(),"Master telling slaves to collect")
         # Tell the slaves to enter collect with the pds's pds_id
         self.__command_slaves(self.OP_COLLECT, (pds.pds_id,))
 
@@ -331,7 +334,7 @@ class BackendMPIMaster(Backend):
 
 
 
-def worker_target(command_q,data_q,result_q,map_in_progress,worker_id):
+def worker_target(command_q,data_q,result_q,worker_id):
     '''Defines the target function the workers for every slave node enter into
 
     Parameters
@@ -372,27 +375,34 @@ def worker_target(command_q,data_q,result_q,map_in_progress,worker_id):
             self.pds_store = {}
             self.rank = worker_id #Debugging var. Don't expect PIDs to be small like with rank ids.
 
-
     def map_over_queue():
-        # print("Initiating map over queue")
         #Function to run a map over the shared queue 
-        while map_in_progress.value:
-            res = []
-            for data_item in IterableQueue(data_q):
-                item_index,item_data = data_item
-                item_res = func(item_data)
-                result_q.put((item_index,item_res))
+        while True:
+            data_item = data_q.get() #Block till we get data
+            if data_item is None: #None is the termination character
+                break
+            item_index,item_data = data_item
+            item_res = func(item_data)
+            result_q.put((item_index,item_res))
+
+    # def map_over_queue():
+    #     #Function to run a map over the shared queue 
+    #     while map_in_progress.value:
+    #         for data_item in IterableQueue(data_q):
+    #             item_index,item_data = data_item
+    #             item_res = func(item_data)
+    #             result_q.put((item_index,item_res))
 
     globals()['backend'] = pseudo_worker_backend()
     pid =  os.getpid()
     # print("Started worker with pid",pid," worker id:",worker_id)
-
     log_fd = open("logs/worker_"+str(worker_id),"w")
-
+    # log_fd = open("/dev/null","w")
     while True:
         # print(pid,"Waiting for a command in queue")
         command = command_q.get()
 
+        #They don't have parallelize. 
         if command[0] == OP_MAP:
             map_start = time.time()
             # print(pid,"Got map.")
@@ -440,16 +450,19 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self,num_subprocesses=multiprocessing.cpu_count()):
+    def __init__(self,num_subprocesses=12):
 
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
+
+        self.num_subprocesses = num_subprocesses
+
         #Define the vars that will hold the pds ids received from master to operate on
         self.__rec_pds_id = None
         self.__rec_pds_id_result = None
 
-
+        print("Initialized a backend mpi slave with rank",self.rank)
         #Initialize a BDS store for both master & slave.
         self.bds_store = {}
 
@@ -459,11 +472,12 @@ class BackendMPISlave(Backend):
 
         #Define the shared queues/vars the worker procs need.
         self.data_q = multiprocessing.Queue()
-        self.map_in_progress = multiprocessing.Value('b',0)
+        # self.map_in_progress = multiprocessing.Value('b',0)
         self.result_q = multiprocessing.Queue()
 
         # self.log_fd = open("logs/node_"+str(self.rank),"w")
 
+        print(self.rank,">Trying to spawn ",num_subprocesses,"processes workers")
         for i in range(num_subprocesses):
             #Initialize a local(private) command queue for each subproc
             command_q = multiprocessing.Queue()
@@ -471,7 +485,7 @@ class BackendMPISlave(Backend):
             worker_id = self.rank*100+i
             #Create a process, tell it to start running the worker_target function
             # and pass it all it's shared queues/datas
-            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,self.map_in_progress,worker_id))
+            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,worker_id))
             p.start()
 
             #Save the private queues for each subproc so we can communicate
@@ -532,13 +546,6 @@ class BackendMPISlave(Backend):
             elif op == self.OP_MAP:
                 pds_id, pds_id_result, function_packed = data[1:]
                 self.__rec_pds_id, self.__rec_pds_id_result = pds_id, pds_id_result
-
-                #Use cloudpickle to convert back function string to a function
-                # func = cloudpickle.loads(function_packed)
-                #Set the function's backend to current class
-                #so it can access bds_store properly
-                # func.backend = self
-
 
                 # Access an existing PDS
                 pds = self.pds_store[pds_id]
@@ -619,6 +626,7 @@ class BackendMPISlave(Backend):
         #Get the PDS id we should store this data in
         pds_id, pds_id_new = self.__get_received_pds_id()
 
+        #Get it's local node level chunk from master rank
         data_chunk = self.comm.scatter(None, root=0)
 
         # print("Slave got data chunk",data_chunk)
@@ -646,7 +654,7 @@ class BackendMPISlave(Backend):
             a new parallel data set that contains the result of the map
         """
 
-        MAP_START = time.time()
+        # MAP_START = time.time()
         #Get the PDS id we operate on and the new one to store the result in
         pds_id, pds_id_new = self.__get_received_pds_id()
 
@@ -658,21 +666,18 @@ class BackendMPISlave(Backend):
         #Create a data packet to send the workers
         worker_data_packet = (self.OP_MAP,func)
 
-        #So the workers know a map is in progress
-        self.map_in_progress.value = True
-
-
         #Send it off to the workers
         self.__broadcast_command_to_workers(worker_data_packet)
-
-        MAP_SENT_COMMAND = time.time()
 
         # print("Finished brodcasting. Now populating with ",total_data_elements)
         #Populate the data_q with the data that needs to be distributed
         for item_index,item_data in enumerate(pds.python_list):
             self.data_q.put((item_index,item_data))
 
-        MAP_SENT_DATA = time.time()
+        #Put terminating commands to the subprocesses so they know a map is done. 
+        for _ in range(self.num_subprocesses):
+            self.data_q.put(None)
+        # MAP_SENT_DATA = time.time()
 
 
         # print ("Finished populating. Waiting for result_q to fill up")
@@ -688,9 +693,7 @@ class BackendMPISlave(Backend):
                 rdd_indices+=[item_index]
                 rdd+=[item_res]
 
-        MAP_REVC_DATA = time.time()
-
-        self.map_in_progress.value = False
+        # MAP_REVC_DATA = time.time()
 
         # print("Got rdd",rdd)
         # print("got rdd indices",rdd_indices)
@@ -700,7 +703,7 @@ class BackendMPISlave(Backend):
 
         # print("Rdd sorted",rdd_sorted)
         pds_res = PDSMPI(rdd_sorted, pds_id_new, self)
-        MAP_DONE = time.time()
+        # MAP_DONE = time.time()
 
 
         # data =    "MAP_START "+str(MAP_START)+"\nMAP_SENT_COMMAND "+str(MAP_SENT_COMMAND)+"\nMAP_SENT_DATA "+str(MAP_SENT_DATA)+"\nMAP_REVC_DATA "+str(MAP_REVC_DATA)+"\nMAP_DONE "+str(MAP_DONE)+"\n"
@@ -754,14 +757,14 @@ class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else Backend
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
-
+  
         if self.size < 2:
             raise ValueError('A minimum of 2 ranks are required for the MPI backend')
 
 
         #Set the global backend
         globals()['backend'] = self
-
+        print("Initialized main backend class with a rank",self.rank)
 
         #Call the appropriate constructors and pass the required data
         if self.rank == 0:
