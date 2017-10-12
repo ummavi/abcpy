@@ -396,7 +396,7 @@ def worker_target(command_q,data_q,result_q,worker_id):
     globals()['backend'] = pseudo_worker_backend()
     pid =  os.getpid()
     # print("Started worker with pid",pid," worker id:",worker_id)
-    log_fd = open("logs/worker_"+str(worker_id),"w")
+    # log_fd = open("logs/worker_"+str(worker_id),"w")
     # log_fd = open("/dev/null","w")
     while True:
         # print(pid,"Waiting for a command in queue")
@@ -417,7 +417,7 @@ def worker_target(command_q,data_q,result_q,worker_id):
                 Exception("Worker",pid," ran into an error during map ",e)
 
             #Write at the end to not mess with timing results.    
-            log_fd.write("MAP_START "+str(map_start)+"\nMAP_END "+str(time.time())+"\n")
+            # log_fd.write("MAP_START "+str(map_start)+"\nMAP_END "+str(time.time())+"\n")
 
         elif command[0] == OP_BROADCAST:
 
@@ -450,7 +450,7 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self,num_subprocesses=36):
+    def __init__(self,num_subprocesses=(multiprocessing.cpu_count()-1)):
 
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
@@ -462,7 +462,7 @@ class BackendMPISlave(Backend):
         self.__rec_pds_id = None
         self.__rec_pds_id_result = None
 
-        print("Initialized a backend mpi slave with rank",self.rank)
+        # print("Initialized a backend mpi slave with rank",self.rank)
         #Initialize a BDS store for both master & slave.
         self.bds_store = {}
 
