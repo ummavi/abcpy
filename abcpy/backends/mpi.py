@@ -334,12 +334,12 @@ class BackendMPIMaster(Backend):
 
 
 
-def worker_target(command_q,data_q,result_q,worker_id):
+def worker_target(command_pipe,data_q,result_pipe,worker_id):
     '''Defines the target function the workers for every slave node enter into
 
     Parameters
         ----------
-        command_q: multiprocessing.queue
+        command_pipe: multiprocessing.queue
             a queue of commands the worker listens to continuously from the node master
             commands are of the form (command_type,**data)
             (OP_DELETEBDS,bds_id) is to delete the local BDS of bds_id
@@ -352,7 +352,7 @@ def worker_target(command_q,data_q,result_q,worker_id):
         data_q: multiprocessing.queue
             a queue to grab data off the master while map is still going on
 
-        result_q: multiprocessing.queue
+        result_pipe: multiprocessing.queue
             a queue to push the results of the worker back to the parent
 
         map_in_progress: multiprocessing.value
@@ -379,11 +379,14 @@ def worker_target(command_q,data_q,result_q,worker_id):
         #Function to run a map over the shared queue 
         while True:
             data_item = data_q.get() #Block till we get data
+            # print(worker_id,"Got a data item",data_item, data_item is None)
             if data_item is None: #None is the termination character
+                print("Executor",worker_id," got a sentinel ")
+                # result_pipe.send(None)
                 break
             item_index,item_data = data_item
             item_res = func(item_data)
-            result_q.put((item_index,item_res))
+            result_pipe.send((item_index,item_res))
 
     # def map_over_queue():
     #     #Function to run a map over the shared queue 
@@ -391,16 +394,16 @@ def worker_target(command_q,data_q,result_q,worker_id):
     #         for data_item in IterableQueue(data_q):
     #             item_index,item_data = data_item
     #             item_res = func(item_data)
-    #             result_q.put((item_index,item_res))
+    #             result_pipe.put((item_index,item_res))
 
     globals()['backend'] = pseudo_worker_backend()
     pid =  os.getpid()
-    # print("Started worker with pid",pid," worker id:",worker_id)
+    print("Started worker with pid",pid," worker id:",worker_id)
     # log_fd = open("logs/worker_"+str(worker_id),"w")
     # log_fd = open("/dev/null","w")
     while True:
-        # print(pid,"Waiting for a command in queue")
-        command = command_q.get()
+        # print(worker_id,pid,"Waiting for a command in queue")
+        command = command_pipe.recv()
 
         #They don't have parallelize. 
         if command[0] == OP_MAP:
@@ -434,7 +437,7 @@ def worker_target(command_q,data_q,result_q,worker_id):
             del backend.bds_store[bds_id]
 
         elif command[0] == OP_FINISH:
-            # print(pid,"Got Finish")
+            print(pid,"Got Finish")
             break
         else:
             print("Invalid command!")
@@ -468,29 +471,34 @@ class BackendMPISlave(Backend):
 
         #Define a list to hold the private queues for each worker proc.
         self.worker_processes = []
-        self.worker_command_queues = []
+        self.worker_command_pipes = []
+        self.worker_result_pipes = []
+
 
         #Define the shared queues/vars the worker procs need.
         self.data_q = multiprocessing.Queue()
         # self.map_in_progress = multiprocessing.Value('b',0)
-        self.result_q = multiprocessing.Queue()
+        # self.result_pipe = multiprocessing.Queue()
 
         # self.log_fd = open("logs/node_"+str(self.rank),"w")
 
         print(self.rank,">Trying to spawn ",num_subprocesses,"processes workers")
         for i in range(num_subprocesses):
             #Initialize a local(private) command queue for each subproc
-            command_q = multiprocessing.Queue()
+            # command_pipe = multiprocessing.Queue()
+            command_q_read,command_q_write = multiprocessing.Pipe(duplex=False)
+            result_q_read,result_q_write = multiprocessing.Pipe(duplex=False)
 
             worker_id = self.rank*100+i
             #Create a process, tell it to start running the worker_target function
             # and pass it all it's shared queues/datas
-            p = multiprocessing.Process(target=worker_target, args=(command_q,self.data_q,self.result_q,worker_id))
+            p = multiprocessing.Process(target=worker_target, args=(command_q_read,self.data_q,result_q_write,worker_id))
             p.start()
 
             #Save the private queues for each subproc so we can communicate
             self.worker_processes+=[p]
-            self.worker_command_queues+=[command_q]
+            self.worker_command_pipes+=[command_q_write]
+            self.worker_result_pipes+=[result_q_read]
 
         #Go into an infinite loop waiting for commands from the user.
         self.slave_run()
@@ -503,9 +511,9 @@ class BackendMPISlave(Backend):
         command in their command_queus 
         """
         # print("Broadcasting command",command)
-        for i,q in enumerate(self.worker_command_queues):
+        for i,q in enumerate(self.worker_command_pipes):
             # print ("Pushing command to process",i)
-            q.put(command)
+            q.send(command)
 
 
     def slave_run(self):
@@ -537,6 +545,7 @@ class BackendMPISlave(Backend):
 
             op = data[0]
             if op == self.OP_PARALLELIZE:
+                # print("Slave got parallelize")
                 pds_id = data[1]
                 self.__rec_pds_id = pds_id
                 pds = self.parallelize([])
@@ -544,6 +553,7 @@ class BackendMPISlave(Backend):
 
 
             elif op == self.OP_MAP:
+                # print("Slave's about to map")
                 pds_id, pds_id_result, function_packed = data[1:]
                 self.__rec_pds_id, self.__rec_pds_id_result = pds_id, pds_id_result
 
@@ -559,6 +569,7 @@ class BackendMPISlave(Backend):
                 self.broadcast(None)
 
             elif op == self.OP_COLLECT:
+                print("Slave got a collect")
                 pds_id = data[1]
 
                 # Access an existing PDS from data store
@@ -659,7 +670,7 @@ class BackendMPISlave(Backend):
         pds_id, pds_id_new = self.__get_received_pds_id()
 
 
-        #Initialize a common data_q and result_q for all the slaves to pop data off
+        #Initialize a common data_q and result_pipe for all the slaves to pop data off
         #  and to place their results in
         total_data_elements = len(pds.python_list)
 
@@ -669,29 +680,48 @@ class BackendMPISlave(Backend):
         #Send it off to the workers
         self.__broadcast_command_to_workers(worker_data_packet)
 
-        # print("Finished brodcasting. Now populating with ",total_data_elements)
+        print("Finished brodcasting. Now populating with ",total_data_elements)
         #Populate the data_q with the data that needs to be distributed
         for item_index,item_data in enumerate(pds.python_list):
             self.data_q.put((item_index,item_data))
-
-        #Put terminating commands to the subprocesses so they know a map is done. 
-        for _ in range(self.num_subprocesses):
-            self.data_q.put(None)
         # MAP_SENT_DATA = time.time()
 
 
-        # print ("Finished populating. Waiting for result_q to fill up")
+        # print ("Finished populating. Waiting for result_pipe to fill up")
         #Wait till the result queue is fully populated 
         rdd = []
         rdd_indices = []
 
+
+        # while len(rdd)<total_data_elements:
+        #     # print("len(rdd)",len(rdd),"/",total_data_elements)
+        #     for e in  IterableQueue(self.result_pipe):
+        #         item_index,item_res = e
+        #         # print("Got a result",e)
+        #         rdd_indices+=[item_index]
+        #         rdd+=[item_res]
+
+   
         while len(rdd)<total_data_elements:
-            # print("len(rdd)",len(rdd),"/",total_data_elements)
-            for e in  IterableQueue(self.result_q):
-                item_index,item_res = e
-                # print("Got a result",e)
-                rdd_indices+=[item_index]
-                rdd+=[item_res]
+            # print("Master> Have ",len(rdd),"elements so far")
+            # print("Master> len(rdd)",len(rdd),"/",total_data_elements)
+            # print(rdd_indices)
+            #Repeat until we have all results
+            for it,r_q in enumerate(self.worker_result_pipes):
+                if r_q.poll():
+                    #See if it has some data. If not, ignore.
+                    res = r_q.recv()
+                    item_index,item_res = res
+                    rdd_indices+=[item_index]
+                    rdd+=[item_res]
+
+
+        # print("Pushing Nones")
+        #Put terminating commands to the subprocesses so they know a map is done. 
+        for _ in range(self.num_subprocesses):
+            self.data_q.put(None)
+
+
 
         # MAP_REVC_DATA = time.time()
 
