@@ -1,8 +1,219 @@
 import numpy as np
 import cloudpickle
+import pickle
 
 from mpi4py import MPI
 from abcpy.backends import Backend, PDS, BDS
+
+import multiprocessing
+
+class BackendMPISlave(Backend):
+    """Defines the behavior of the slaves processes
+
+    This class defines how the slaves should behave during operation.
+    Slaves are those processes(not nodes like Spark) that have rank!=0
+    and whose ids are not present in the list of non workers.
+    """
+
+    OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
+
+
+    def __init__(self,num_executors=multiprocessing.cpu_count()-1):
+        self.comm = MPI.COMM_WORLD
+        self.size = self.comm.Get_size()
+        self.rank = self.comm.Get_rank()
+
+        #Define the vars that will hold the pds ids received from master to operate on
+        self.__rec_pds_id = None
+        self.__rec_pds_id_result = None
+
+        #Initialize a BDS store for both master & slave.
+        self.bds_store = {}
+
+        #Initialize an executor pool that distributes work amongst the CPUs on the nodes
+        self.executor_pool = multiprocessing.Pool(num_executors)
+
+        #Go into an infinite loop waiting for commands from the user.
+        self.slave_run()
+
+
+    def slave_run(self):
+        """
+        This method is the infinite loop a slave enters directly from init.
+        It makes the slave wait for a command to perform from the master and
+        then calls the appropriate function.
+
+        This method also takes care of the synchronization of data between the
+        master and the slaves by matching PDSs based on the pds_ids sent by the master
+        with the command.
+
+        Commands received from the master are of the form of a tuple.
+        The first component of the tuple is always the operation to be performed
+        and the rest are conditional on the operation.
+
+        (op,pds_id) where op == OP_PARALLELIZE for parallelize
+        (op,pds_id, pds_id_result,func) where op == OP_MAP for map.
+        (op,pds_id) where op == OP_COLLECT for a collect operation
+        (op,pds_id) where op == OP_DELETEPDS for a delete of the remote PDS on slaves
+        (op,) where op==OP_FINISH for the slave to break out of the loop and terminate
+        """
+
+        # Initialize PDS data store here because only slaves need to do it.
+        self.pds_store = {}
+
+        while True:
+            data = self.comm.bcast(None, root=0)
+
+            op = data[0]
+            if op == self.OP_PARALLELIZE:
+                pds_id = data[1]
+                self.__rec_pds_id = pds_id
+                pds = self.parallelize([])
+                self.pds_store[pds.pds_id] = pds
+
+
+            elif op == self.OP_MAP:
+                pds_id, pds_id_result, function_packed = data[1:]
+                self.__rec_pds_id, self.__rec_pds_id_result = pds_id, pds_id_result
+
+                #Use cloudpickle to convert back function string to a function
+                func = cloudpickle.loads(function_packed)
+                #Set the function's backend to current class
+                #so it can access bds_store properly
+
+
+                # Access an existing PDS
+                pds = self.pds_store[pds_id]
+                pds_res = self.map(func, pds)
+
+                # Store the result in a newly gnerated PDS pds_id
+                self.pds_store[pds_res.pds_id] = pds_res
+
+            elif op == self.OP_BROADCAST:
+                self.__bds_id = data[1]
+                self.broadcast(None)
+
+            elif op == self.OP_COLLECT:
+                pds_id = data[1]
+
+                # Access an existing PDS from data store
+                pds = self.pds_store[pds_id]
+
+                self.collect(pds)
+
+            elif op == self.OP_DELETEPDS:
+                pds_id = data[1]
+                del self.pds_store[pds_id]
+
+            elif op == self.OP_DELETEBDS:
+                bds_id = data[1]
+                del self.bds_store[bds_id]
+
+            elif op == self.OP_FINISH:
+                quit()
+            else:
+                raise Exception("Slave recieved unknown command code")
+
+
+    def __get_received_pds_id(self):
+        """
+        Function to retrieve the pds_id(s) we received from the master to associate
+        our slave's created PDS with the master's.
+        """
+
+        return self.__rec_pds_id, self.__rec_pds_id_result
+
+
+    def parallelize(self, python_list):
+        """
+        This method distributes the list on the available workers and returns a
+        reference object.
+
+        The list is split into number of workers many parts as a numpy array.
+        Each part is sent to a separate worker node using the MPI scatter.
+
+        SLAVE: python_list should be [] and is ignored by the scatter()
+
+        Parameters
+        ----------
+        list: Python list
+            the list that should get distributed on the worker nodes
+
+        Returns
+        -------
+        PDSMPI class (parallel data set)
+            A reference object that represents the parallelized list
+        """
+
+        #Get the PDS id we should store this data in
+        pds_id, pds_id_new = self.__get_received_pds_id()
+
+        data_chunk = self.comm.scatter(None, root=0)
+
+        pds = PDSMPI(data_chunk, pds_id, self)
+
+        return pds
+
+
+    def map(self, func, pds):
+        """
+        A distributed implementation of map that works on parallel data sets (PDS).
+
+        On every element of pds the function func is called.
+
+        Parameters
+        ----------
+        func: Python func
+            A function that can be applied to every element of the pds
+        pds: PDS class
+            A parallel data set to which func should be applied
+
+        Returns
+        -------
+        PDSMPI class
+            a new parallel data set that contains the result of the map
+        """
+
+        #Get the PDS id we operate on and the new one to store the result in
+        pds_id, pds_id_new = self.__get_received_pds_id()
+
+        # global backend
+        rdd = list(self.executor_pool.map(func, pds.python_list))
+
+        pds_res = PDSMPI(rdd, pds_id_new, self)
+
+        return pds_res
+
+
+    def collect(self, pds):
+        """
+        Gather the pds from all the workers,
+        send it to the master and return it as a standard Python list.
+
+        Parameters
+        ----------
+        pds: PDS class
+            a parallel data set
+
+        Returns
+        -------
+        Python list
+            all elements of pds as a list
+        """
+
+        #Send the data we have back to the master
+        _ = self.comm.gather(pds.python_list, root=0)
+
+
+    def broadcast(self, value):
+        """
+        Value is ignored for the slaves. We get data from master.
+
+        __bds_id is obtained right before the fn is called.
+        """
+        value = self.comm.bcast(None, root=0)
+        self.bds_store[self.__bds_id] = value
+
 
 class BackendMPIMaster(Backend):
     """Defines the behavior of the master process
@@ -28,9 +239,6 @@ class BackendMPIMaster(Backend):
         self.__current_pds_id = 0
         self.__current_bds_id = 0
 
-        #Initialize a BDS store for both master & slave.
-        self.bds_store = {}
-
 
     def __command_slaves(self, command, data):
         """
@@ -54,7 +262,8 @@ class BackendMPIMaster(Backend):
         elif command == self.OP_MAP:
             #In map we receive data as (pds_id,pds_id_new,func)
             #Use cloudpickle to dump the function into a string.
-            function_packed = self.__sanitize_and_pack_func(data[2])
+            function_packed = cloudpickle.dumps(data[2],pickle.HIGHEST_PROTOCOL)
+
             data_packet = (command, data[0], data[1], function_packed)
 
         elif command == self.OP_BROADCAST:
@@ -73,34 +282,6 @@ class BackendMPIMaster(Backend):
 
         _ = self.comm.bcast(data_packet, root=0)
 
-
-    def __sanitize_and_pack_func(self, func):
-        """
-        Prevents the function from packing the backend by temporarily
-        setting it to another variable and then uses cloudpickle
-        to pack it into a string to be sent.
-
-        Parameters
-        ----------
-        func: Python Function
-            The function we are supposed to pack while sending it along to the slaves
-            during the map function
-
-        Returns
-        -------
-        Returns a string of the function packed by cloudpickle
-
-        """
-
-        #Set the backend to None to prevent it from being packed
-        globals()['backend'] = {}
-
-        function_packed = cloudpickle.dumps(func)
-
-        #Reset the backend to self after it's been packed
-        globals()['backend'] = self
-
-        return function_packed
 
 
     def __generate_new_pds_id(self):
@@ -247,7 +428,7 @@ class BackendMPIMaster(Backend):
 
         _ = self.comm.bcast(value, root=0)
 
-        bds = BDSMPI(value, bds_id, self)
+        bds = BDSMPI(value, bds_id)
         return bds
 
 
@@ -279,9 +460,6 @@ class BackendMPIMaster(Backend):
         """
 
         if  not self.finalized:
-            #The master deallocates it's BDS data. Explicit because
-            #.. bds_store and BDSMPI object are disconnected.
-            del backend.bds_store[bds_id]
             self.__command_slaves(self.OP_DELETEBDS, (bds_id,))
 
 
@@ -299,210 +477,6 @@ class BackendMPIMaster(Backend):
         #Finalize the connection because the slaves should have finished.
         MPI.Finalize()
         self.finalized = True
-
-
-class BackendMPISlave(Backend):
-    """Defines the behavior of the slaves processes
-
-    This class defines how the slaves should behave during operation.
-    Slaves are those processes(not nodes like Spark) that have rank!=0
-    and whose ids are not present in the list of non workers.
-    """
-
-    OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
-
-
-    def __init__(self):
-        self.comm = MPI.COMM_WORLD
-        self.size = self.comm.Get_size()
-        self.rank = self.comm.Get_rank()
-
-        #Define the vars that will hold the pds ids received from master to operate on
-        self.__rec_pds_id = None
-        self.__rec_pds_id_result = None
-
-        #Initialize a BDS store for both master & slave.
-        self.bds_store = {}
-
-        #Go into an infinite loop waiting for commands from the user.
-        self.slave_run()
-
-
-    def slave_run(self):
-        """
-        This method is the infinite loop a slave enters directly from init.
-        It makes the slave wait for a command to perform from the master and
-        then calls the appropriate function.
-
-        This method also takes care of the synchronization of data between the
-        master and the slaves by matching PDSs based on the pds_ids sent by the master
-        with the command.
-
-        Commands received from the master are of the form of a tuple.
-        The first component of the tuple is always the operation to be performed
-        and the rest are conditional on the operation.
-
-        (op,pds_id) where op == OP_PARALLELIZE for parallelize
-        (op,pds_id, pds_id_result,func) where op == OP_MAP for map.
-        (op,pds_id) where op == OP_COLLECT for a collect operation
-        (op,pds_id) where op == OP_DELETEPDS for a delete of the remote PDS on slaves
-        (op,) where op==OP_FINISH for the slave to break out of the loop and terminate
-        """
-
-        # Initialize PDS data store here because only slaves need to do it.
-        self.pds_store = {}
-
-        while True:
-            data = self.comm.bcast(None, root=0)
-
-            op = data[0]
-            if op == self.OP_PARALLELIZE:
-                pds_id = data[1]
-                self.__rec_pds_id = pds_id
-                pds = self.parallelize([])
-                self.pds_store[pds.pds_id] = pds
-
-
-            elif op == self.OP_MAP:
-                pds_id, pds_id_result, function_packed = data[1:]
-                self.__rec_pds_id, self.__rec_pds_id_result = pds_id, pds_id_result
-
-                #Use cloudpickle to convert back function string to a function
-                func = cloudpickle.loads(function_packed)
-                #Set the function's backend to current class
-                #so it can access bds_store properly
-                # func.backend = self
-
-
-                # Access an existing PDS
-                pds = self.pds_store[pds_id]
-                pds_res = self.map(func, pds)
-
-                # Store the result in a newly gnerated PDS pds_id
-                self.pds_store[pds_res.pds_id] = pds_res
-
-            elif op == self.OP_BROADCAST:
-                self.__bds_id = data[1]
-                self.broadcast(None)
-
-            elif op == self.OP_COLLECT:
-                pds_id = data[1]
-
-                # Access an existing PDS from data store
-                pds = self.pds_store[pds_id]
-
-                self.collect(pds)
-
-            elif op == self.OP_DELETEPDS:
-                pds_id = data[1]
-                del self.pds_store[pds_id]
-
-            elif op == self.OP_DELETEBDS:
-                bds_id = data[1]
-                del self.bds_store[bds_id]
-
-            elif op == self.OP_FINISH:
-                quit()
-            else:
-                raise Exception("Slave recieved unknown command code")
-
-
-    def __get_received_pds_id(self):
-        """
-        Function to retrieve the pds_id(s) we received from the master to associate
-        our slave's created PDS with the master's.
-        """
-
-        return self.__rec_pds_id, self.__rec_pds_id_result
-
-
-    def parallelize(self, python_list):
-        """
-        This method distributes the list on the available workers and returns a
-        reference object.
-
-        The list is split into number of workers many parts as a numpy array.
-        Each part is sent to a separate worker node using the MPI scatter.
-
-        SLAVE: python_list should be [] and is ignored by the scatter()
-
-        Parameters
-        ----------
-        list: Python list
-            the list that should get distributed on the worker nodes
-
-        Returns
-        -------
-        PDSMPI class (parallel data set)
-            A reference object that represents the parallelized list
-        """
-
-        #Get the PDS id we should store this data in
-        pds_id, pds_id_new = self.__get_received_pds_id()
-
-        data_chunk = self.comm.scatter(None, root=0)
-
-        pds = PDSMPI(data_chunk, pds_id, self)
-
-        return pds
-
-
-    def map(self, func, pds):
-        """
-        A distributed implementation of map that works on parallel data sets (PDS).
-
-        On every element of pds the function func is called.
-
-        Parameters
-        ----------
-        func: Python func
-            A function that can be applied to every element of the pds
-        pds: PDS class
-            A parallel data set to which func should be applied
-
-        Returns
-        -------
-        PDSMPI class
-            a new parallel data set that contains the result of the map
-        """
-
-        #Get the PDS id we operate on and the new one to store the result in
-        pds_id, pds_id_new = self.__get_received_pds_id()
-
-        rdd = list(map(func, pds.python_list))
-
-        pds_res = PDSMPI(rdd, pds_id_new, self)
-
-        return pds_res
-
-
-    def collect(self, pds):
-        """
-        Gather the pds from all the workers,
-        send it to the master and return it as a standard Python list.
-
-        Parameters
-        ----------
-        pds: PDS class
-            a parallel data set
-
-        Returns
-        -------
-        Python list
-            all elements of pds as a list
-        """
-
-        #Send the data we have back to the master
-        _ = self.comm.gather(pds.python_list, root=0)
-
-
-    def broadcast(self, value):
-        """
-        Value is ignored for the slaves. We get data from master
-        """
-        value = self.comm.bcast(None, root=0)
-        self.bds_store[self.__bds_id] = value
-
 
 class BackendMPI(BackendMPIMaster if MPI.COMM_WORLD.Get_rank() == 0 else BackendMPISlave):
     """A backend parallelized by using MPI
@@ -557,23 +531,61 @@ class PDSMPI(PDS):
             pass
 
 
+
 class BDSMPI(BDS):
     """
     This is a wrapper for MPI's BDS class.
     """
 
-    def __init__(self, object, bds_id, backend_obj):
-        #The BDS data is no longer saved in the BDS object.
-        #It will access & store the data only from the current backend
+    def __init__(self, object, bds_id, keep_data_on_pickle=False):
+        """
+        keep_data_on_pickle: Flag to check whether to pack the actual
+                         data when it's pickled and passed.
+        """
         self.bds_id = bds_id
-        backend.bds_store[self.bds_id] = object
-        # self.backend_obj = backend_obj
+        self.data = object
+        self.keep_data_on_pickle = keep_data_on_pickle
 
     def value(self):
         """
         This method returns the actual object that the broadcast data set represents.
         """
-        return backend.bds_store[self.bds_id]
+        return self.data
+
+    def __setstate__(self,state):
+        """Defines how the function should behave when it's unpickled.
+
+        The keep_data_on_pickle determines if the BDS has data or not. 
+        if it already has data then we don't have to do anything.
+        If it doesn't(this should happen when the slave node receives it)
+        then we grab the data from the local copy using the BDS_ID
+        """
+        global backend
+        self.bds_id = state["bds_id"]
+        self.keep_data_on_pickle = state["keep_data_on_pickle"]
+
+        if self.keep_data_on_pickle:
+            self.data = state["data"]
+        else:
+            self.data = backend.bds_store[self.bds_id]
+
+        #Back to true so when the slaves try to pickle it for the
+        #.. executors, they keep the data they need to send.
+        self.keep_data_on_pickle = True
+
+
+    def __getstate__(self):
+        """Defines how the function should behave when it's pickled.
+
+        The keep_data_on_pickle determines if we want to send the data.
+                We don't want to keep the data when passing from master
+                to slaves. We want to keep the data when passing it from
+                slaves to the executors.
+        """
+        state = self.__dict__.copy()
+        if not self.keep_data_on_pickle:
+            del state['data']
+        return state
 
     def __del__(self):
         """
