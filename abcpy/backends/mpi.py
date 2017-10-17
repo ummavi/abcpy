@@ -18,7 +18,7 @@ class BackendMPISlave(Backend):
     OP_PARALLELIZE, OP_MAP, OP_COLLECT, OP_BROADCAST, OP_DELETEPDS, OP_DELETEBDS, OP_FINISH = [1, 2, 3, 4, 5, 6, 7]
 
 
-    def __init__(self,num_executors=multiprocessing.cpu_count()-1):
+    def __init__(self,num_executors=None):
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
@@ -178,7 +178,7 @@ class BackendMPISlave(Backend):
         pds_id, pds_id_new = self.__get_received_pds_id()
 
         # global backend
-        rdd = list(self.executor_pool.map(func, pds.python_list))
+        rdd = list(self.executor_pool.map(func, pds.python_list,chunksize=1))
 
         pds_res = PDSMPI(rdd, pds_id_new, self)
 
